@@ -3,10 +3,14 @@
 
 ## The Data
 First and foremost, I owe a data courtesy to several institutions/individuals:
-• Baseball Almanac - I used this site to pull tables of draftee information
-• Michael Lee (https://www.mikelee.co/projects/) - Michael created a very wonderful script that makes it very easy to spider through tables of stats sites to pull data on players in the Minor League system–a relatively difficult task compared to finding data on major league players
-• Baseball-Reference - THE institution for anything on baseball stats. Most of the data was collected from their tables.
-• Lahman’s Baseball Archive - A very popular dataset for basic baseball analysis. There’s even a very useful package for R that I did not use.
+
+- Baseball Almanac - I used this site to pull tables of draftee information
+
+- Michael Lee (https://www.mikelee.co/projects/) - Michael created a very wonderful script that makes it very easy to spider through tables of stats sites to pull data on players in the Minor League system–a relatively difficult task compared to finding data on major league players
+
+- Baseball-Reference - THE institution for anything on baseball stats. Most of the data was collected from their tables.
+
+- Lahman’s Baseball Archive - A very popular dataset for basic baseball analysis. There’s even a very useful package for R that I did not use.
 
 ## Files
 - The primary file of interest is the EVasquezVilla_FinalPaper.pdf. The rmd file includes all code used for the analysis. data.rmd includes a webscraping file created by Michael Lee, which is mentioned in the data courtesies.
