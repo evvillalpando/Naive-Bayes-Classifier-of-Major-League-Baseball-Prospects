@@ -1,0 +1,80 @@
+---
+
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data
+
+Draft data:
+
+```{r}
+draft <- as_tibble(read.csv("draft.csv"))
+draft <- draft %>%
+  select(!Phase) %>%
+  rename(Number = `X.`,
+         DraftedBy = `Drafted.By`,
+         PlayerName = `Player.Name`,
+         DraftedFrom = `Drafted.From`) %>%
+  mutate(Rd = factor(Rd),
+         DraftedBy = factor(DraftedBy),
+         POS = factor(POS),
+         DraftedFrom = factor(DraftedFrom))
+head(draft, n = 3)
+```
+
+Lahman data - Info of players in the Major Leagues
+```{r, echo = FALSE}
+lehman <- as_tibble(read.csv("People.txt"))
+
+lehman <- lehman %>%
+  mutate(playerName = paste(nameFirst, nameLast),
+         debut = as.Date(debut),
+         finalGame = as.Date(finalGame),
+         bats = factor(bats),
+         throws = factor(throws)) %>%
+  select(playerName, playerID, bats, throws, debut, finalGame) %>%
+  filter(debut >= "2007-01-01")
+
+joined.data <- left_join(draft, lehman, by = c("PlayerName" = "playerName"))
+joined.data <- joined.data %>%
+  mutate(major_league_player = ifelse(is.na(debut),  "No", "Yes")) %>%
+  mutate(major_league_player = factor(major_league_player)) %>%
+  select(PlayerName, debut, major_league_player, POS)
+
+head(joined.data, n = 3)
+```
+# Add a column to determine if the draftee has made it to the majors
+
+
+nonpitchers <- joined.data %>%
+  filter(!POS  %in% c("P", "LHP", "RHP")) %>%
+  select(PlayerName, playerID, Rd, Number, throws, bats, POS, debut, major_league_player)
+
+minors_batting <- distinct(as_tibble(read.csv("batting.csv")), Name, .keep_all = TRUE)
+
+joined.hitters <- left_join(nonpitchers, minors_batting, by = c("PlayerName" = "Name"))
+
+complete <- joined.hitters%>%
+  filter(!is.na(AB), AB != 0)%>%
+  select(!c(Rk, min_playerid, teams, season, Pos.Summary, Lev, Tm, Age, playerID, Rd, Number, debut, throws, bats))
+
+advanced_stats<- complete %>%
+  filter(AB >= 20) %>%
+  mutate(StrikePercentage = round(SO / AB, 4),
+         ISO = SLG - BA,
+         wOBA = ((.69*(BB-IBB)) + (.719*HBP) + (.87*(H - X2B - X3B - HR)) + (1.217*X2B) + (1.529*X3B) + (1.94*HR)) / (AB + BB - IBB + SF + HBP)) %>%
+  select(c(PlayerName, major_league_player, POS, ISO, BA, wOBA, StrikePercentage))```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

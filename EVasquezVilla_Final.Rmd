@@ -1,0 +1,331 @@
+---
+author: "Eduardo Vasquez-Villalpando"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+# Bayesian Analysis in Baseball
+
+## Introduction
+One of my dreams is to one day be able to apply the toolkit of a data scientist towards domains that I am especially interested. One of which is baseball. Major League Baseball in the United States has changed dramatically over the last decade and it's primarily due to the ubiquitous application of data science concepts towards the game. Having a team of data analysts help formulate game strategy, draft selection, prospect development, and the business side of Major League Baseball is what is now known as the "Moneyball" approach. The concept of Moneyball was popularized by a book and film based on the true story of the Oakland Athletics' unprecedented approach to the game of baseball in the early 2000s, in which they employed the help of statisticians, not regular baseball scouts, to construct their team of what the stats deemed to be "value" picks. This allowed the Oakland Athletics, and many teams since, to be highly competitive in a sport that is often an uphill battle for teams without much capital to acquire superstars. In the 2020 MLB World Series, the Tampa Bay Rays had the **3rd lowest payroll** in baseball and managed to give the winners, the Los Angeles Dodgers, a fairly competitive series with just 28.3 million dollars in total salary. The Dodgers's combined salary in 2020 was $191.2 million. How did they manage to do so? Of course with incredibly talented players, but the Tampa Bay Rays are also regarded as *the* team in the MLB that employs analytics more than any other team--often using unorthodox strategies that go against conventional baseball wisdom, yet work more often than not.
+
+My goal with this project was to explore a very hot button topic in the realm of Major League Baseball analytics: **Bayesian Analysis**. In looking through job postings over the years for MLB Data Scientist jobs (mostly to get an understanding of what to aim for in my skillset), one of the most common traits they desire in statisticians is knowledge of Bayesian concepts.
+
+Bayesian Analysis is seemingly a very deep rabbit hole of a concept, and I could only hope to scratch the surface in the scope of this project. In essence, it revolves around Bayes' Theorem to combine **prior** knowledge with new information/data to come to a new, **posterior probability** (more on this later). In this project I will apply this concept to help determine the potential of a draft prospect to make it to the Major Leagues. More specifically, I will use a model known as a Naive Bayes Classifier to help determine the outcome of a binary class based on a particular player's attributes: "Eventual MLB player" and "Will not make it to the MLB."
+
+Here's a brief description of how a typical career in the MLB works: one goes to college and/or high school, gets drafted by a Major League organization, becomes a **prospect** in the team's "farm system"/minor league teams, and, if good enough, will someday make their debut as a player in the Major Leagues. As we'll see later, the probability of making it to the majors after being drafted is very, very low.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)    
+library(caret)
+library(ggplot2)
+library(modeldata)
+library(stringr)
+library(rsample)
+```
+
+
+## The Data
+
+First and foremost, I owe a data courtesy to several institutions/individuals:
+
+- **Baseball Almanac** - I used this site to pull tables of draftee information
+
+- **Michael Lee (https://www.mikelee.co/projects/)** - Michael created a very wonderful script that makes it very easy to spider through tables of stats sites to pull data on players in the Minor League system--a relatively difficult task compared to finding data on major league players
+
+- **Baseball-Reference** - THE institution for anything on baseball stats. Most of the data was collected from their tables.
+
+- **Lahman's Baseball Archive** - A very popular dataset for basic baseball analysis. There's even a very useful package for R that I did not use.
+
+#### Starting with Draft Data
+
+For this project, I decided to focus on just 4 years of draft classes from 2007-2010. Again, this data was pulled from Baseball Almanac with simple copy/pasting into a csv. This table forms the basis for the rest of the data by providing keys (player names) on which to join later tables (the rest of the attributes will later be pruned):
+
+```{r, echo = FALSE}
+draft <- as_tibble(read.csv("draft.csv"))
+#Converting some columns to factors and deselecting "Phase" Column:
+draft <- draft %>%
+  select(!Phase) %>%
+  rename(Number = `X.`,
+         DraftedBy = `Drafted.By`,
+         PlayerName = `Player.Name`,
+         DraftedFrom = `Drafted.From`) %>%
+  #Convert several variables to factors
+  mutate(Rd = factor(Rd),
+         DraftedBy = factor(DraftedBy),
+         POS = factor(POS),
+         DraftedFrom = factor(DraftedFrom))
+```
+```{r}
+head(draft)
+```
+#### Creating our binary class:
+
+This step was easily the most important as I used a join between the above table and a dataset on Major League Baseball player information to create our attribute of focus in this project: major_league_player. This factor is binary with two classes: "Yes" and "No". In other words, "Yes" indicates that the player *has* eventually made it to the Major Leagues and "No" means that player has yet to make after 10 years. The table of interest is the "People" table from Lahman's Baseball Archive. Here is what it looks like:
+
+```{r}
+lehman <- as_tibble(read.csv("People.txt"))
+lehman <- lehman %>%
+  mutate(playerName = paste(nameFirst, nameLast),
+         debut = as.Date(debut),
+         finalGame = as.Date(finalGame),
+         bats = factor(bats),
+         throws = factor(throws)) %>%
+  select(playerName, playerID, bats, throws, debut, finalGame) %>%
+  filter(debut >= "2007-01-01")
+```
+
+```{r}
+head(lehman)
+```
+By default, the People table *only* contains information on Major League Baseball professionals. This trait allowed me to simply conduct a left join onto the previous "Draft" table. Then, using the code below, if the "debut" column for the joined table was NA for a particular player, they would be labeled "No" in the new column "major_league_player" and otherwise "Yes".
+
+```{r}
+joined.data <- left_join(draft, lehman, by = c("PlayerName" = "playerName"))
+# Add a column to determine if the draftee has made it to the majors
+joined.data <- joined.data %>%
+  mutate(major_league_player = ifelse(is.na(debut),  "No", "Yes")) %>%
+  mutate(major_league_player = factor(major_league_player))
+
+# Shortened table to show new column made
+head(joined.data %>% select(PlayerName, major_league_player))
+```
+#### No Pitchers
+
+In baseball, one of the positions played is called the "Pitcher". Generally speaking, pitchers are *not* expected to hit the ball, therefore they are mostly evaluated on different metrics. For this project, I decided to focus on non-pitchers and their offensive stats--more on this limitation later.
+
+```{r, echo = FALSE} 
+nonpitchers <- joined.data %>%
+  filter(!POS  %in% c("P", "LHP", "RHP")) %>%
+  select(PlayerName, playerID, Rd, Number, throws, bats, POS, debut, major_league_player)
+```
+
+#### Adding primitive stats
+
+Now, we will add relevant stats for players who play a position that is expected to hit by doing another join. This time, I'm appending the previous table with data scraped from Baseball-Reference. **Note**: players often spend *years* developing their talent before they are deemed ready for the Majors. Adding stats for more than one year across players who spend a varying amount of time in the minor league system would be terribly messy as players typically become *much* better players even a year after their debut in the minor leagues system. Presumably it's beneficial to train the model on a players stats in the first year, too: better to identify the better players early, right?
+
+The stats added in this dataset are relatively primitive: things like "AB" (at bats) and "H" (hits) are relatively meaningless statistics, as it's the proportion of at-bats that result in hits that is more important. I decided to leave this table unmodified first to see if altering the stats later would yield better results. Here is what the data going into our first model looks like.
+```{r, echo=FALSE}
+minors_batting <- distinct(as_tibble(read.csv("batting.csv")), Name, .keep_all = TRUE)
+minors_batting <- data.frame(lapply(minors_batting, function(x){
+  str_replace_all(x, "\\*+", "")
+  }))
+
+minors_batting <- data.frame(lapply(minors_batting, function(x){
+  str_replace_all(x, "#+", "")
+  }))
+
+nonpitchers <- joined.data %>%
+  filter(!POS  %in% c("P", "LHP", "RHP")) %>%
+  select(PlayerName, playerID, Rd, Number, throws, bats, POS, debut, major_league_player)
+
+joined.hitters <- left_join(nonpitchers, minors_batting, by = c("PlayerName" = "Name"))
+
+complete <- joined.hitters%>%
+  filter(!is.na(AB), AB != 0)%>%
+  select(!c(Rk, min_playerid, teams, season, Pos.Summary, Lev, Tm, Age, playerID, Rd, Number, debut, throws, bats))
+
+
+complete[,4:length(complete)] <- sapply(complete[,4:length(complete)], as.numeric)
+head(complete)
+```
+#### Adding more advanced statistics
+
+As mentioned, the stats above are primitive compared to the stats that are commonly accepted as key indicators of player performance in today's game. I only included a handful of *many* stats used by professional analysts, as these were a lot less complex as other statistics have formulas that weigh attributes as detailed as altitude in a particular baseball park. I decided to focus on the following stats, which are all derived from manipulation of the above primitive stats:
+
+1. **Strike Percentage** - This is simply one of many measures of a player's "plate discipline" and is the proportion of at-bats that result in a strikeout, which is markedly negative outcome of an at-bat. 
+
+2. **ISO** - This is a measure of a player's "raw power". It is derived by subtracting a players "Slugging Percentage" by their "Batting Average", essentially resulting in a player's ability to hit for extra bases. Hitting for power (i.e. "swinging for the fences" or trying to always hit the ball out of the park) is increasingly becoming a trend in today's game, largely due to analytics, so I thought it might be a good statistic to include.
+
+3. **wOBA** - Weighted On-Base Average. This is a slightly more sophisticated stat than batting average, which is simply the proportion of at-bats that result in a hit, as it adds a weight to each outcome of a hit: a double, which is worth two bases, is worth more than a single, and a home run has a higher weight than any other outcome. Again, the home run is increasingly becoming the stat to pad in recent years, so hopefully this stat will prove more useful than batting average for our model.
+
+Finally, this is what the second dataset for our second model looks like:
+```{r, echo = FALSE}
+advanced_stats<- complete %>%
+  filter(AB >= 20) %>%
+  mutate(StrikePercentage = round(SO / AB, 4),
+         ISO = SLG - BA,
+         wOBA = ((.69*(BB-IBB)) + (.719*HBP) + (.87*(H - X2B - X3B - HR)) + (1.217*X2B) + (1.529*X3B) + (1.94*HR)) 
+         / (AB + BB - IBB + SF + HBP)) %>%
+  select(c(PlayerName, major_league_player, POS, ISO, BA, wOBA, StrikePercentage))
+
+advanced_stats <- data.frame(distinct(advanced_stats, PlayerName, .keep_all = TRUE))
+head(advanced_stats)
+```
+## Exploratory Data Visualization
+
+I realize the stats above might be a bit intimidating to anyone who might not be too familiar with baseball, so here are some exploratory plots to give a better idea of what those advanced stats actually mean in terms of how they differ between players who do *not* make it to the majors, and those who do. Based on their distributions, a major league caliber player generally has a higher ISO, a higher BA, a higher wOBA, and a lower Strike Percentage. Note the normality of the graphs, as this will be important when we discuss the model itself.
+
+```{r, echo = FALSE}
+ggplot(advanced_stats, aes(x = wOBA, fill = major_league_player)) + geom_density(alpha = .75)
+ggplot(advanced_stats, aes(x = BA, fill = major_league_player)) + geom_density(alpha = .75)
+ggplot(advanced_stats, aes(x = ISO, fill = major_league_player)) + geom_density(alpha = .75)
+ggplot(advanced_stats, aes(x = StrikePercentage, fill = major_league_player)) + geom_density(alpha = .75)
+```
+
+
+## Naive Bayes Classifier
+
+Bayes' formula is a simple formula using conditional probability to predict an event A given B has occurred. First, we must define a *prior*, that is, the **probability of event A happening** across a population, with no additional information given about that particular observation. In this case, the **prior** will be defined as 
+$A_{mlb}$, i.e. the probability that a player in the MLB draft will make it to the Major Leagues (with $A_{mlb}^{C}$ = the probability a player *doesn't* make it to the MLB). We can count this using the following code:
+```{r}
+complete %>%
+  summarize(
+    `Percentage of draftees that make it to the majors within 10 years` = sum(major_league_player == "Yes") / n())
+
+```
+
+
+So, our prior probability is $A_{mlb} \approx.1933$, meaning just under 20% of players drafted make it to the major leagues within 10 years after being drafted. However, we using Bayes' Theorem, in theory we can *more accurately* find the probability a particular draftee will make it to the majors using Bayes' Theorem:
+$$ P(A|B)=\frac{P(B|A)\times P(A)}{P(B)} $$
+Here is a very simple example of how the formula applies to classifying problems. Consider a simple model that determines whether or not a group of children will play outside 
+<p align="center">
+![example](/Users/villalpando/Desktop/Screen Shot 2020-11-21 at 8.44.03 PM.png)
+</p>
+And now, here is that same graphic but an example of how an attribute like, for example, a Batting Average > .300 might alter the probability of a player making it to the major leagues:
+<p align="center">
+![example](/Users/villalpando/Desktop/Screen Shot 2020-11-21 at 9.03.41 PM.png)
+</p>
+
+The goal of implementing a Naive Bayes Classifier is to factor in all those those predictors, $P(B)$, that maximize the algorithm's ability to discern players with Major League potential. If the model performs well, it can then be applied to *new* players that have been drafted. We'll test this by applying the model twice: once to the primitive stats table, and once to the advanced stats table. For both, the datasets will be split into a training and a testing set.
+
+**Note**: Two key assumptions are made in a Naive Bayes Classifier:
+
+1. The predictors (the Bs) are assumed to be conditionally independent of one another
+
+2. Continuous predictors are normally distributed.
+
+As we saw above for the advanced stats table, many of those predictors *are* normally distributed. However, in the primitive stats table there are *many* predictors that are neither normally distributed nor conditionally independent. The first graph below shows a correlation table across all numeric variables in the primitive dataset (darker blue/red implies heavier correlation). For the second, simply note the shapes of the density plots on numeric stats aren't particularly normally distributed either.
+
+```{r, echo = FALSE}
+complete %>%
+  filter(major_league_player == "Yes") %>%
+  select_if(is.numeric) %>%
+  cor() %>%
+  corrplot::corrplot()
+```
+
+```{r, echo = FALSE}
+complete %>% 
+  select_if(is.numeric) %>% 
+  gather(metric, value) %>% 
+  ggplot(aes(value, fill = metric)) + 
+  geom_density(show.legend = FALSE) + 
+  facet_wrap(~ metric, scales = "free")
+```
+
+
+And again, the variables for the second model are normally distributed, however, still heavily correlated with one another and not conditionally independent:
+
+```{r, echo = FALSE}
+advanced_stats %>%
+  filter(major_league_player == "Yes") %>%
+  select_if(is.numeric) %>%
+  cor() %>%
+  corrplot::corrplot()
+
+
+```
+
+```{r, echo = FALSE}
+advanced_stats %>% 
+  select_if(is.numeric) %>%
+  gather(metric, value) %>% 
+  ggplot(aes(value, fill = metric)) + 
+  geom_density(show.legend = FALSE) + 
+  facet_wrap(~ metric, scales = "free")
+```
+
+
+This then begs the question: **why even bother with a Naive Bayes Classifier?** First, consider how we would compute a posterior probability across all predictors: our response variable is binary--either a player makes it to the majors, or they don't-- this gives us 2 possibilities, which would be raised to the power of 23 (how many possible predictors we have in the data set). This results in this many probabilities needed to be computed:
+```{r}
+2**23
+```
+However, by assuming conditional independence and normality, only 2 x 23 probabilities are needed. A much less computationally expensive task, and still a somewhat powerful predictor. More importantly, as it applies to the domain of baseball, *we don't particularly care about the exact posterior probability*. Often, we simply care about whether or not a *specific* player is more likely to be a major league-caliber player than not (i.e. >50%) to determine whether it is worthwhile to continue developing their talent.
+
+## Model 1: Primitive Stats
+I used the caret package to perform the algorithm for a Naive Bayes Classifier using the train() function and its "nb" method (naive bayes). There are a few tuning parameters like fL and Laplace smoothing which honestly somewhat fell over my head, but based on other papers I've seen on Naive Bayes, proper tuning of them can yield fairly decent results.
+```{r, warning = FALSE, message = FALSE, echo = FALSE}
+set.seed(12345)
+split <- initial_split(complete, prop = .7, strata = "major_league_player")
+train <- training(split)
+test <- testing(split)
+
+x <- train %>% select(!c(PlayerName, major_league_player))
+y <- train$major_league_player
+#implementing 10-fold cross validation
+train_control <- trainControl(
+  method = "cv",
+  number = 10
+)
+nb1 <- train(
+  x = x,
+  y = y,
+  method = "nb",
+  trControl = train_control
+)
+confusionMatrix(nb1)
+
+```
+And now, using the predict() function on the testing data
+```{r, warning = FALSE, message = FALSE}
+
+pred <- predict(nb1, newdata = test)
+confusionMatrix(pred, test$major_league_player)
+```
+
+Not *terrible* results to say we can predict a player's career trajectory with a ~74% accuracy, but evaluating the Cohen's Kappa value shows that the model performed rather poorly. Let's see if we can do a little better.
+
+## Model 2: Advanced Baseball Stats
+```{r, warning = FALSE, echo = FALSE}
+
+set.seed(12345)
+
+split2 <- initial_split(advanced_stats, prop = .7, strata = "major_league_player")
+train2 <- training(split2)
+test2  <- testing(split2)
+
+x2 <- train2 %>% select(!c(PlayerName, major_league_player))
+y2 <- train2$major_league_player
+
+train_control2 <- trainControl(
+  method = "cv",
+  number = 10
+)
+nb2 <- train(
+  x = x2,
+  y = y2,
+  method = "nb",
+  trControl = train_control2)
+confusionMatrix(nb2)
+pred <- predict(nb2, newdata = test2)
+confusionMatrix(pred, test2$major_league_player)
+```
+An improvement, but still not particularly good.
+
+## Conclusion
+
+A win for the frequentists. The biggest problem is that if we were to train a toddler to simply shake their head "no" at every baseball prospect they saw, in total they'd have better predictive power than the model performed here. Here's a reminder on what the priori probability was:
+
+```{r, echo = FALSE}
+complete %>%
+  summarize(
+    `Percentage of draftees that make it to the majors within 10 years` = round(sum(major_league_player == "Yes") / n(), 4))
+```
+
+This means that the toddler would have predicted their career trajectory with a >80% accuracy.
+
+I'm not exactly sure *why* the model performed poorly, but I have some ideas. First, everything I researched was quick to point out that a Naive Bayes Classifier is far from the first choice for prediction/classifying problems. Its strength comes from its ease of implementation and computationally inexpensive nature.
+
+It's also worth noting that a baseball organization obviously cannot just say "No" to every prospect they pick up--this would *truly* be a case of "paralysis by analysis." At the end of the day, as noted above, we aren't particularly interested in the exact posterior probability calculated using Bayes' theorem: we might simply want to know if a player is more likely than not to make it to the Majors. For this, a Naive Bayes Classifier could still be useful to some degree.
+
+I speculate that the model performed poorly for a few reasons. For one, the graphs shown above tell us that the data's predictors are *far* from conditionally independent. Violating this assumption of the Naive Bayes Classifier likely came at the cost of predictive power. However, many data sets I've seen through researching this method show that despite violating the assumptions of normality in continuous variables and conditional independence among predictors, the model can still perform very well. There are dozens of articles online showing >95% accuracy in classifying the Iris dataset, for example. 
+
+This leads me to believe that the poor performance is largely due to my selection of predictors and the constraints I held on the dataset for simplicity's sake. Again, I only included data from a prospect's *first* year of playing in the minors after being drafted--perhaps an average across their first few years, or improvement from one year to the next would be better indicators. Additionally, a selection of more conditionally independent predictors would likely yield better predictive power Keep in mind that baseball isn't all about offensive power! Many players are more inclined towards defense, and their abilities on both sides of the field are what makes them Major League caliber players.
+
+Of course, a better understanding of the tuning parameters could prove helpful as well.
+
+For now, I'll let the frequentists have their laugh.
